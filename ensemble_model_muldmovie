@@ -20,8 +20,6 @@ import joblib
 import matplotlib.pyplot as plt
 import seaborn as sns
 from datasets import load_dataset
-from sklearn.utils.class_weight import compute_class_weight
-from sklearn.metrics import f1_score
 
 # Set up logging
 logging.basicConfig(
@@ -40,13 +38,13 @@ class TextPreprocessor:
                     nltk.download(resource, quiet=True)
                 except Exception as e:
                     logger.warning(f"Error downloading {resource}: {str(e)}")
-            
+
             self.stop_words = set(stopwords.words(language))
             self.lemmatizer = WordNetLemmatizer()
             self.stemmer = PorterStemmer()
             self.use_stemming = use_stemming
             logger.info("TextPreprocessor initialized successfully")
-            
+
         except Exception as e:
             logger.error(f"Error initializing TextPreprocessor: {str(e)}")
             raise
@@ -73,7 +71,7 @@ class TextPreprocessor:
         try:
             if isinstance(texts, str):
                 texts = [texts]
-            
+
             processed_texts = []
             for text in tqdm(texts, desc="Preprocessing texts"):
                 # Clean text
@@ -88,7 +86,7 @@ class TextPreprocessor:
                 else:
                     tokens = [self.lemmatizer.lemmatize(t) for t in tokens]
                 processed_texts.append(' '.join(tokens))
-            
+
             return processed_texts
         except Exception as e:
             logger.error(f"Error in preprocess: {str(e)}")
@@ -96,7 +94,7 @@ class TextPreprocessor:
 
 class TextEmbeddingExtractor:
     """Text embedding extraction class"""
-    def __init__(self, 
+    def __init__(self,
                  embedding_model: str = 'word2vec-google-news-300',
                  normalize_vectors: bool = True):
         try:
@@ -117,7 +115,7 @@ class TextEmbeddingExtractor:
             for word in words:
                 if word in self.embedding_model:
                     word_vectors.append(self.embedding_model[word])
-            
+
             if word_vectors:
                 return np.mean(word_vectors, axis=0)
             return np.zeros(self.vector_size)
@@ -131,105 +129,54 @@ class TextEmbeddingExtractor:
             for text in tqdm(texts, desc="Extracting features"):
                 vector = self.get_document_vector(text)
                 feature_vectors.append(vector)
-            
+
             feature_vectors = np.array(feature_vectors)
-            
+
             if self.normalize_vectors:
                 feature_vectors = self.scaler.fit_transform(feature_vectors)
-            
+
             # Additional normalization for better performance
             scaler = MinMaxScaler()
             feature_vectors = scaler.fit_transform(feature_vectors)
-            
+
             return feature_vectors
         except Exception as e:
             logger.error(f"Error in extract_features: {str(e)}")
             raise
 
 class EnsembleClassifier:
-    """Improved ensemble classifier with better weighting and analysis"""
+    """Ensemble classifier optimized for MULD dataset"""
     def __init__(self, random_state: int = 42):
         self.random_state = random_state
         self.label_encoder = LabelEncoder()
-        
+
         # Initialize base classifiers with optimized parameters
+        class_weights = compute_class_weight('balanced', classes=np.unique(y), y=y)
         self.classifiers = {
-            'nb': MultinomialNB(
-                alpha=0.1  # Smoothing parameter
-            ),
-            'svm': SVC(
-                kernel='rbf',  # RBF kernel for better performance
-                probability=True,
-                class_weight='balanced',
-                random_state=random_state,
-                C=1.0,
-                gamma='scale'
-            ),
-            'rf': RandomForestClassifier(
-                n_estimators=200,
-                max_depth=None,
-                min_samples_split=2,
-                min_samples_leaf=1,
-                class_weight='balanced',
-                random_state=random_state,
-                n_jobs=-1  # Use all CPUs
-            ),
-            'gb': GradientBoostingClassifier(
-                n_estimators=200,
-                learning_rate=0.1,
-                max_depth=3,
-                subsample=0.8,
-                random_state=random_state
-            )
+            'nb': MultinomialNB(),
+            'svm': SVC(kernel='linear', probability=True, class_weight='balanced', random_state=random_state),
+            'rf': RandomForestClassifier(n_estimators=200, class_weight='balanced', max_depth=None, random_state=random_state),
+            'gb': GradientBoostingClassifier(n_estimators=200, learning_rate=0.1, max_depth=5, random_state=random_state)
         }
-        
+
         self.ensemble = None
         self.model_weights = None
-        self.class_weights = None
-        self.model_predictions = {}
-        self.feature_importances_ = None
-
-    def _calculate_model_weights(self, X: np.ndarray, y: np.ndarray) -> np.ndarray:
-        """Calculate model weights using multiple metrics"""
-        weights = []
-        metrics = ['accuracy', 'f1_weighted', 'precision_weighted', 'recall_weighted']
-        
-        for name, model in self.classifiers.items():
-            model_scores = []
-            for metric in metrics:
-                scores = cross_val_score(model, X, y, scoring=metric, cv=5)
-                model_scores.append(scores.mean())
-            
-            # Log individual metric scores
-            logger.info(f"{name} scores - Accuracy: {model_scores[0]:.4f}, "
-                       f"F1: {model_scores[1]:.4f}, "
-                       f"Precision: {model_scores[2]:.4f}, "
-                       f"Recall: {model_scores[3]:.4f}")
-            
-            # Use average of all metrics as final weight
-            weights.append(np.mean(model_scores))
-        
-        # Normalize weights
-        return np.array(weights) / sum(weights)
 
     def fit(self, X: np.ndarray, y: Union[np.ndarray, List[str]]) -> None:
-        """Fit the ensemble with improved weighting and analysis"""
         try:
             # Encode labels
             y_encoded = self.label_encoder.fit_transform(y)
-            
-            # Calculate class weights
-            self.class_weights = compute_class_weight('balanced', 
-                                                    classes=np.unique(y_encoded), 
-                                                    y=y_encoded)
-            
-            logger.info("Class weights: %s", dict(zip(self.label_encoder.classes_, self.class_weights)))
-            
-            # Calculate model weights using multiple metrics
-            self.model_weights = self._calculate_model_weights(X, y_encoded)
-            logger.info("Model weights: %s", 
-                       dict(zip(self.classifiers.keys(), self.model_weights)))
-            
+
+            # Evaluate base models with cross-validation
+            weights = []
+            for name, model in self.classifiers.items():
+                scores = cross_val_score(model, X, y_encoded, cv=5)
+                weights.append(scores.mean())
+                logger.info(f"{name.upper()} CV Score: {scores.mean():.4f}")
+
+            # Normalize weights
+            self.model_weights = np.array(weights) / sum(weights)
+
             # Create and fit ensemble
             self.ensemble = VotingClassifier(
                 estimators=list(self.classifiers.items()),
@@ -237,105 +184,33 @@ class EnsembleClassifier:
                 weights=self.model_weights,
                 n_jobs=-1
             )
-            
-            # Fit the ensemble
+
             self.ensemble.fit(X, y_encoded)
-            
-            # Store individual model predictions
-            self.model_predictions = {
-                name: model.predict(X) 
-                for name, model in self.classifiers.items()
-            }
-            
-            # Calculate feature importances where available
-            self._calculate_feature_importances(X.shape[1])
-            
             logger.info("Ensemble model fitted successfully")
-            
+
         except Exception as e:
             logger.error(f"Error in fit: {str(e)}")
             raise
 
-    def _calculate_feature_importances(self, n_features: int) -> None:
-        """Calculate feature importances from models that support it"""
-        importances = np.zeros(n_features)
-        count = 0
-        
-        for name, model in self.classifiers.items():
-            if hasattr(model, 'feature_importances_'):
-                importances += model.feature_importances_
-                count += 1
-            elif name == 'svm' and hasattr(model, 'coef_'):
-                importances += np.abs(model.coef_[0])
-                count += 1
-        
-        if count > 0:
-            self.feature_importances_ = importances / count
-
-    def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        """Get weighted probability predictions from all models"""
-        probas = []
-        for name, model in self.classifiers.items():
-            model_proba = model.predict_proba(X)
-            weight = self.model_weights[list(self.classifiers.keys()).index(name)]
-            weighted_proba = model_proba * weight
-            probas.append(weighted_proba)
-        
-        return np.average(probas, axis=0)
-
     def predict(self, X: np.ndarray) -> np.ndarray:
-        """Make predictions using weighted probabilities"""
-        probas = self.predict_proba(X)
-        predictions = np.argmax(probas, axis=1)
-        return self.label_encoder.inverse_transform(predictions)
-
-    def analyze_ensemble(self, X: np.ndarray, y: Union[np.ndarray, List[str]]) -> Dict:
-        """Analyze individual model contributions and ensemble behavior"""
-        analysis = {}
-        y_encoded = self.label_encoder.transform(y)
-        
-        # Individual model performance
-        for name, model in self.classifiers.items():
-            y_pred = model.predict(X)
-            analysis[name] = {
-                'accuracy': accuracy_score(y_encoded, y_pred),
-                'f1_score': f1_score(y_encoded, y_pred, average='weighted'),
-                'weight': self.model_weights[list(self.classifiers.keys()).index(name)],
-                'confusion_matrix': confusion_matrix(y_encoded, y_pred)
-            }
-        
-        # Disagreement analysis
-        predictions = np.array([model.predict(X) for model in self.classifiers.values()])
-        disagreements = np.sum(predictions != predictions[0], axis=0)
-        analysis['disagreement_rate'] = np.mean(disagreements > 0)
-        
-        # Feature importance analysis
-        if self.feature_importances_ is not None:
-            analysis['feature_importances'] = self.feature_importances_
-        
-        return analysis
+        try:
+            predictions = self.ensemble.predict(X)
+            return self.label_encoder.inverse_transform(predictions)
+        except Exception as e:
+            logger.error(f"Error in predict: {str(e)}")
+            raise
 
     def evaluate(self, X: np.ndarray, y: Union[np.ndarray, List[str]]) -> Dict:
-        """Enhanced evaluation with detailed metrics"""
         try:
             y_encoded = self.label_encoder.transform(y)
-            y_pred = self.predict(X)
-            y_pred_encoded = self.label_encoder.transform(y_pred)
-            
-            # Get detailed analysis
-            ensemble_analysis = self.analyze_ensemble(X, y)
-            
+            y_pred = self.ensemble.predict(X)
+
             return {
-                'accuracy': accuracy_score(y_encoded, y_pred_encoded),
-                'classification_report': classification_report(
-                    y_encoded, y_pred_encoded, 
-                    target_names=self.label_encoder.classes_
-                ),
-                'confusion_matrix': confusion_matrix(y_encoded, y_pred_encoded),
-                'model_analysis': ensemble_analysis,
-                'disagreement_rate': ensemble_analysis['disagreement_rate']
+                'accuracy': accuracy_score(y_encoded, y_pred),
+                'classification_report': classification_report(y_encoded, y_pred,
+                                                           target_names=self.label_encoder.classes_),
+                'confusion_matrix': confusion_matrix(y_encoded, y_pred)
             }
-            
         except Exception as e:
             logger.error(f"Error in evaluate: {str(e)}")
             raise
@@ -345,19 +220,19 @@ def prepare_muld_data(dataset_split):
     texts = []
     labels = []
 
-      
+
     for item in dataset_split:
         # Use the 'input' field for text
         text = item['input']
-        
+
         # Use the 'output' field for labels
         # Since 'output' is a list, we'll take the first element
         label = item['output'][0] if item['output'] else None
-        
+
         if text and label:  # Only add if both text and label are present
             texts.append(text)
             labels.append(label)
-    
+
     return texts, labels
 
 class MULDClassificationPipeline:
@@ -375,15 +250,15 @@ class MULDClassificationPipeline:
         try:
             logger.info("Starting text preprocessing...")
             processed_texts = self.preprocessor.preprocess(texts)
-            
+
             logger.info("Extracting features...")
             X_features = self.embedding_extractor.extract_features(processed_texts)
-            
+
             logger.info("Training ensemble classifier...")
             self.classifier.fit(X_features, labels)
-            
+
             logger.info("Pipeline training completed successfully")
-            
+
         except Exception as e:
             logger.error(f"Error in pipeline fit: {str(e)}")
             raise
@@ -443,60 +318,38 @@ def plot_results(evaluation_dict: Dict, pipeline: MULDClassificationPipeline, ti
     plt.tight_layout()
     plt.show()
 
-def plot_ensemble_analysis(evaluation):
-    # Plot confusion matrix and model performances
-    plt.figure(figsize=(15, 5))
-    
-    # Individual model performances
-    model_analysis = evaluation['model_analysis']
-    model_names = list(model_analysis.keys())[:-1]  # Exclude disagreement_rate
-    accuracies = [model_analysis[name]['accuracy'] for name in model_names]
-    weights = [model_analysis[name]['weight'] for name in model_names]
-    
-    plt.subplot(1, 2, 1)
-    x = np.arange(len(model_names))
-    width = 0.35
-    plt.bar(x - width/2, accuracies, width, label='Accuracy')
-    plt.bar(x + width/2, weights, width, label='Weight')
-    plt.xlabel('Models')
-    plt.ylabel('Score')
-    plt.title('Model Performance and Weights')
-    plt.xticks(x, model_names)
-    plt.legend()
-    
-    # Confusion matrix
-    plt.subplot(1, 2, 2)
-    sns.heatmap(evaluation['confusion_matrix'], 
-                annot=True, 
-                fmt='d',
-                cmap='Blues',
-                xticklabels=evaluation['classification_report'].split()[5:7],
-                yticklabels=evaluation['classification_report'].split()[5:7])
-    plt.title(f'Confusion Matrix\nDisagreement Rate: {evaluation["disagreement_rate"]:.2f}')
-    
-    plt.tight_layout()
-    plt.show()
-
 if __name__ == "__main__":
     # Load MULD dataset
     logger.info("Loading MULD dataset...")
     dataset = load_dataset("ghomasHudson/muld", name="Character Archetype Classification")
-    
+
+   # Print dataset information
+    print("\nDataset structure:")
+    print(dataset)
+
     # Prepare data
     train_texts, train_labels = prepare_muld_data(dataset['train'])
     val_texts, val_labels = prepare_muld_data(dataset['validation'])
     test_texts, test_labels = prepare_muld_data(dataset['test'])
-    
+
+    # Print some statistics
+    print("\nDataset statistics:")
+    print(f"Training samples: {len(train_texts)}")
+    print(f"Validation samples: {len(val_texts)}")
+    print(f"Test samples: {len(test_texts)}")
+    print("\nUnique labels:", set(train_labels))
+
     # Initialize pipeline
-    pipeline = TextClassificationPipeline(
-        embedding_model='glove-twitter-200',  # Changed from glove-wiki-gigaword-100
-        use_stemming=True
+    logger.info("Initializing pipeline...")
+    pipeline = MULDClassificationPipeline(
+        embedding_model='glove-wiki-gigaword-100',  # Using smaller model for faster processing
+        use_stemming=False
     )
-    
+
     # Train the pipeline
     logger.info("Training pipeline...")
     pipeline.fit(train_texts, train_labels)
-    
+
     # Evaluate on validation set
     logger.info("Evaluating on validation set...")
     val_evaluation = pipeline.evaluate(val_texts, val_labels)
@@ -505,18 +358,7 @@ if __name__ == "__main__":
     print("Accuracy:", val_evaluation['accuracy'])
     print("\nClassification Report:")
     print(val_evaluation['classification_report'])
-    print("\nModel Analysis:")
-    for model, stats in val_evaluation['model_analysis'].items():
-        if model != 'disagreement_rate':
-            print(f"\n{model}:")
-            print(f"Accuracy: {stats['accuracy']:.4f}")
-            print(f"F1 Score: {stats['f1_score']:.4f}")
-            print(f"Weight: {stats['weight']:.4f}")
-    print(f"\nDisagreement Rate: {val_evaluation['disagreement_rate']:.4f}")
-    
-    # Plot validation results
-    plot_ensemble_analysis(val_evaluation)
-    
+
     # Evaluate on test set
     logger.info("Evaluating on test set...")
     test_evaluation = pipeline.evaluate(test_texts, test_labels)
@@ -525,6 +367,11 @@ if __name__ == "__main__":
     print("Accuracy:", test_evaluation['accuracy'])
     print("\nClassification Report:")
     print(test_evaluation['classification_report'])
-    
-    # Plot test results
-    plot_ensemble_analysis(test_evaluation)
+
+    # Plot results
+    plot_results(val_evaluation, pipeline, "Validation")
+    plot_results(test_evaluation, pipeline, "Test")
+
+    # Save the pipeline
+    pipeline.save_pipeline('muld_classification_pipeline.joblib')
+    logger.info("Pipeline saved successfully")
