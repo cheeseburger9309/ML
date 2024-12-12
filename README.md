@@ -20,7 +20,7 @@ seaborn
 
 
 You can install the required libraries using:
-pip install -r requirements.txt
+pip install
 
 Dataset
 The pipeline works with the MULD & Quality dataset available from HuggingFace's datasets library. 
